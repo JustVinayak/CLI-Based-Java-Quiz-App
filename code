@@ -1,0 +1,1359 @@
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+import java.util.Random;
+import java.util.Collections;
+import java.sql.*;
+import java.io.Console;
+
+public class EnhancedQuizApplication {
+    private static final Scanner scanner = new Scanner(System.in);
+    private static Connection dbConnection;
+    private static User currentUser;
+    private static final Random random = new Random();
+
+    // Database connection constants
+    private static final String DB_URL = "jdbc:sqlite:quiz_app.db";
+    
+    public static void main(String[] args) {
+        try {
+            setupDatabase();
+            showWelcomeScreen();
+            
+            boolean exit = false;
+            while (!exit) {
+                displayMainMenu();
+                int choice = getUserChoice(1, 5);
+                
+                switch (choice) {
+                    case 1:
+                        loginOrRegister();
+                        break;
+                    case 2:
+                        if (isUserLoggedIn()) {
+                            browseQuizzes();
+                        } else {
+                            System.out.println("Please login first.");
+                        }
+                        break;
+                    case 3:
+                        if (isUserLoggedIn()) {
+                            createQuiz();
+                        } else {
+                            System.out.println("Please login first.");
+                        }
+                        break;
+                    case 4:
+                        if (isUserLoggedIn()) {
+                            viewUserStatistics();
+                        } else {
+                            System.out.println("Please login first.");
+                        }
+                        break;
+                    case 5:
+                        exit = true;
+                        System.out.println("Thank you for using the Quiz Application. Goodbye!");
+                        break;
+                }
+            }
+        } catch (SQLException e) {
+            System.out.println("Database error: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            try {
+                if (dbConnection != null && !dbConnection.isClosed()) {
+                    dbConnection.close();
+                }
+            } catch (SQLException e) {
+                System.out.println("Error closing database connection: " + e.getMessage());
+            }
+            scanner.close();
+        }
+    }
+
+    private static void setupDatabase() throws SQLException {
+        // Connect to the database (will create it if it doesn't exist)
+        dbConnection = DriverManager.getConnection(DB_URL);
+        
+        // Create necessary tables if they don't exist
+        createTables();
+        
+        // Load sample data for first-time run
+        if (isDatabaseEmpty()) {
+            loadSampleData();
+        }
+    }
+
+    private static void createTables() throws SQLException {
+        Statement stmt = dbConnection.createStatement();
+        
+        // Users table
+        stmt.execute(
+            "CREATE TABLE IF NOT EXISTS users (" +
+            "user_id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "username TEXT UNIQUE NOT NULL, " +
+            "password TEXT NOT NULL, " +
+            "full_name TEXT NOT NULL, " +
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+            ")"
+        );
+        
+        // Quizzes table
+        stmt.execute(
+            "CREATE TABLE IF NOT EXISTS quizzes (" +
+            "quiz_id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "title TEXT NOT NULL, " +
+            "description TEXT, " +
+            "creator_id INTEGER, " +
+            "difficulty TEXT CHECK(difficulty IN ('EASY', 'MEDIUM', 'HARD')), " +
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+            "FOREIGN KEY (creator_id) REFERENCES users (user_id)" +
+            ")"
+        );
+        
+        // Questions table with question type
+        stmt.execute(
+            "CREATE TABLE IF NOT EXISTS questions (" +
+            "question_id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "quiz_id INTEGER NOT NULL, " +
+            "text TEXT NOT NULL, " +
+            "question_type TEXT CHECK(question_type IN ('MULTIPLE_CHOICE', 'TRUE_FALSE', 'FILL_BLANK', 'SHORT_ANSWER')), " +
+            "difficulty TEXT CHECK(difficulty IN ('EASY', 'MEDIUM', 'HARD')), " +
+            "FOREIGN KEY (quiz_id) REFERENCES quizzes (quiz_id) ON DELETE CASCADE" +
+            ")"
+        );
+        
+        // Options table for multiple choice questions
+        stmt.execute(
+            "CREATE TABLE IF NOT EXISTS options (" +
+            "option_id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "question_id INTEGER NOT NULL, " +
+            "option_text TEXT NOT NULL, " +
+            "is_correct BOOLEAN NOT NULL, " +
+            "FOREIGN KEY (question_id) REFERENCES questions (question_id) ON DELETE CASCADE" +
+            ")"
+        );
+        
+        // Answers table for non-multiple choice questions
+        stmt.execute(
+            "CREATE TABLE IF NOT EXISTS answers (" +
+            "answer_id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "question_id INTEGER NOT NULL, " +
+            "answer_text TEXT NOT NULL, " +
+            "FOREIGN KEY (question_id) REFERENCES questions (question_id) ON DELETE CASCADE" +
+            ")"
+        );
+        
+        // Quiz attempts table
+        stmt.execute(
+            "CREATE TABLE IF NOT EXISTS quiz_attempts (" +
+            "attempt_id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "user_id INTEGER NOT NULL, " +
+            "quiz_id INTEGER NOT NULL, " +
+            "score INTEGER NOT NULL, " +
+            "total_questions INTEGER NOT NULL, " +
+            "taken_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+            "FOREIGN KEY (user_id) REFERENCES users (user_id), " +
+            "FOREIGN KEY (quiz_id) REFERENCES quizzes (quiz_id)" +
+            ")"
+        );
+        
+        stmt.close();
+    }
+
+    private static boolean isDatabaseEmpty() throws SQLException {
+        // Check if users table is empty
+        Statement stmt = dbConnection.createStatement();
+        ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM users");
+        rs.next();
+        int userCount = rs.getInt(1);
+        rs.close();
+        
+        // Check if quizzes table is empty
+        rs = stmt.executeQuery("SELECT COUNT(*) FROM quizzes");
+        rs.next();
+        int quizCount = rs.getInt(1);
+        rs.close();
+        
+        stmt.close();
+        
+        return userCount == 0 || quizCount == 0;
+    }
+
+    private static void loadSampleData() throws SQLException {
+        // Insert admin user
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT OR IGNORE INTO users (username, password, full_name) VALUES (?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        pstmt.setString(1, "admin");
+        pstmt.setString(2, "admin123");  // In a real app, this would be encrypted
+        pstmt.setString(3, "Admin User");
+        pstmt.executeUpdate();
+        
+        ResultSet rs = pstmt.getGeneratedKeys();
+        int adminUserId = rs.next() ? rs.getInt(1) : 1;  // Default to 1 if no key generated
+        rs.close();
+        pstmt.close();
+        
+        // Insert Java Basics quiz
+        pstmt = dbConnection.prepareStatement(
+            "INSERT INTO quizzes (title, description, creator_id, difficulty) VALUES (?, ?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        pstmt.setString(1, "Java Basics");
+        pstmt.setString(2, "Test your knowledge of Java fundamentals");
+        pstmt.setInt(3, adminUserId);
+        pstmt.setString(4, "MEDIUM");
+        pstmt.executeUpdate();
+        
+        rs = pstmt.getGeneratedKeys();
+        int javaQuizId = rs.next() ? rs.getInt(1) : 1;
+        rs.close();
+        pstmt.close();
+        
+        // Insert Web Development quiz
+        pstmt = dbConnection.prepareStatement(
+            "INSERT INTO quizzes (title, description, creator_id, difficulty) VALUES (?, ?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        pstmt.setString(1, "Web Development Basics");
+        pstmt.setString(2, "Test your knowledge of HTML and CSS");
+        pstmt.setInt(3, adminUserId);
+        pstmt.setString(4, "EASY");
+        pstmt.executeUpdate();
+        
+        rs = pstmt.getGeneratedKeys();
+        int webQuizId = rs.next() ? rs.getInt(1) : 2;
+        rs.close();
+        pstmt.close();
+        
+        // Insert Java quiz questions (various types)
+        insertMultipleChoiceQuestion(
+            javaQuizId, 
+            "What does OOP stand for?",
+            "EASY",
+            List.of("Object-Oriented Programming", "Object-Oriented Protocol", "Object-Oriented Platform", "Object-Oriented Procedure"),
+            0
+        );
+        
+        insertMultipleChoiceQuestion(
+            javaQuizId,
+            "What are the four pillars of OOP?",
+            "MEDIUM",
+            List.of("Encapsulation, Inheritance, Polymorphism", 
+                   "Encapsulation, Inheritance, Abstraction", 
+                   "Encapsulation, Inheritance, Polymorphism, Abstraction", 
+                   "None of the above"),
+            2
+        );
+        
+        insertTrueFalseQuestion(
+            javaQuizId,
+            "Java is a purely object-oriented programming language.",
+            "MEDIUM",
+            false
+        );
+        
+        insertFillBlankQuestion(
+            javaQuizId,
+            "The process of defining a method in a subclass having the same name, return type, and parameters as a method in its superclass is called _____.",
+            "HARD",
+            "method overriding"
+        );
+        
+        insertShortAnswerQuestion(
+            javaQuizId,
+            "What Java keyword is used to inherit from a class?",
+            "EASY",
+            "extends"
+        );
+        
+        // Insert Web Development quiz questions
+        insertMultipleChoiceQuestion(
+            webQuizId,
+            "What does HTML stand for?",
+            "EASY",
+            List.of("HyperText Markup Language", "High-Tech Machine Learning", "Home Tool Markup Language"),
+            0
+        );
+        
+        insertMultipleChoiceQuestion(
+            webQuizId,
+            "What does CSS stand for?",
+            "EASY",
+            List.of("Cascading Style Sheets", "Creative Style Sheets", "Computer Style Sheets"),
+            0
+        );
+        
+        insertTrueFalseQuestion(
+            webQuizId,
+            "HTML is a programming language.",
+            "MEDIUM",
+            false
+        );
+        
+        insertFillBlankQuestion(
+            webQuizId,
+            "The CSS property used to change the text color is _____.",
+            "EASY",
+            "color"
+        );
+    }
+
+    private static void insertMultipleChoiceQuestion(int quizId, String questionText, String difficulty, 
+                                                    List<String> options, int correctOptionIndex) throws SQLException {
+        // Insert question
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO questions (quiz_id, text, question_type, difficulty) VALUES (?, ?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        pstmt.setInt(1, quizId);
+        pstmt.setString(2, questionText);
+        pstmt.setString(3, "MULTIPLE_CHOICE");
+        pstmt.setString(4, difficulty);
+        pstmt.executeUpdate();
+        
+        ResultSet rs = pstmt.getGeneratedKeys();
+        int questionId = rs.next() ? rs.getInt(1) : 1;
+        rs.close();
+        pstmt.close();
+        
+        // Insert options
+        pstmt = dbConnection.prepareStatement(
+            "INSERT INTO options (question_id, option_text, is_correct) VALUES (?, ?, ?)"
+        );
+        
+        for (int i = 0; i < options.size(); i++) {
+            pstmt.setInt(1, questionId);
+            pstmt.setString(2, options.get(i));
+            pstmt.setBoolean(3, i == correctOptionIndex);
+            pstmt.executeUpdate();
+        }
+        
+        pstmt.close();
+    }
+
+    private static void insertTrueFalseQuestion(int quizId, String questionText, String difficulty, 
+                                               boolean isTrue) throws SQLException {
+        // Insert question
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO questions (quiz_id, text, question_type, difficulty) VALUES (?, ?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        pstmt.setInt(1, quizId);
+        pstmt.setString(2, questionText);
+        pstmt.setString(3, "TRUE_FALSE");
+        pstmt.setString(4, difficulty);
+        pstmt.executeUpdate();
+        
+        ResultSet rs = pstmt.getGeneratedKeys();
+        int questionId = rs.next() ? rs.getInt(1) : 1;
+        rs.close();
+        pstmt.close();
+        
+        // Insert True/False options
+        pstmt = dbConnection.prepareStatement(
+            "INSERT INTO options (question_id, option_text, is_correct) VALUES (?, ?, ?)"
+        );
+        
+        pstmt.setInt(1, questionId);
+        pstmt.setString(2, "True");
+        pstmt.setBoolean(3, isTrue);
+        pstmt.executeUpdate();
+        
+        pstmt.setInt(1, questionId);
+        pstmt.setString(2, "False");
+        pstmt.setBoolean(3, !isTrue);
+        pstmt.executeUpdate();
+        
+        pstmt.close();
+    }
+
+    private static void insertFillBlankQuestion(int quizId, String questionText, String difficulty,
+                                              String answer) throws SQLException {
+        // Insert question
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO questions (quiz_id, text, question_type, difficulty) VALUES (?, ?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        pstmt.setInt(1, quizId);
+        pstmt.setString(2, questionText);
+        pstmt.setString(3, "FILL_BLANK");
+        pstmt.setString(4, difficulty);
+        pstmt.executeUpdate();
+        
+        ResultSet rs = pstmt.getGeneratedKeys();
+        int questionId = rs.next() ? rs.getInt(1) : 1;
+        rs.close();
+        pstmt.close();
+        
+        // Insert answer
+        pstmt = dbConnection.prepareStatement(
+            "INSERT INTO answers (question_id, answer_text) VALUES (?, ?)"
+        );
+        pstmt.setInt(1, questionId);
+        pstmt.setString(2, answer.toLowerCase());  // Store lowercase for case-insensitive comparison
+        pstmt.executeUpdate();
+        pstmt.close();
+    }
+
+    private static void insertShortAnswerQuestion(int quizId, String questionText, String difficulty,
+                                                String answer) throws SQLException {
+        // Insert question
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO questions (quiz_id, text, question_type, difficulty) VALUES (?, ?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        pstmt.setInt(1, quizId);
+        pstmt.setString(2, questionText);
+        pstmt.setString(3, "SHORT_ANSWER");
+        pstmt.setString(4, difficulty);
+        pstmt.executeUpdate();
+        
+        ResultSet rs = pstmt.getGeneratedKeys();
+        int questionId = rs.next() ? rs.getInt(1) : 1;
+        rs.close();
+        pstmt.close();
+        
+        // Insert answer
+        pstmt = dbConnection.prepareStatement(
+            "INSERT INTO answers (question_id, answer_text) VALUES (?, ?)"
+        );
+        pstmt.setInt(1, questionId);
+        pstmt.setString(2, answer.toLowerCase());  // Store lowercase for case-insensitive comparison
+        pstmt.executeUpdate();
+        pstmt.close();
+    }
+
+    private static void showWelcomeScreen() {
+        System.out.println("====================================");
+        System.out.println("  WELCOME TO ENHANCED QUIZ APPLICATION  ");
+        System.out.println("====================================");
+        System.out.println("Features:");
+        System.out.println("- Multiple question types");
+        System.out.println("- Difficulty levels");
+        System.out.println("- Database persistence");
+        System.out.println("------------------------------------");
+        pressEnterToContinue();
+    }
+
+    private static void displayMainMenu() {
+        clearScreen();
+        System.out.println("====================================");
+        System.out.println("           MAIN MENU               ");
+        System.out.println("====================================");
+        System.out.println("1. " + (isUserLoggedIn() ? "Logout (" + currentUser.getUsername() + ")" : "Login/Register"));
+        System.out.println("2. Browse Quizzes");
+        System.out.println("3. Create Quiz");
+        System.out.println("4. View Statistics");
+        System.out.println("5. Exit");
+        System.out.println("------------------------------------");
+        System.out.print("Enter your choice (1-5): ");
+    }
+
+    private static int getUserChoice(int min, int max) {
+        int choice = -1;
+        boolean validInput = false;
+        
+        while (!validInput) {
+            try {
+                choice = Integer.parseInt(scanner.nextLine().trim());
+                if (choice >= min && choice <= max) {
+                    validInput = true;
+                } else {
+                    System.out.print("Please enter a number between " + min + " and " + max + ": ");
+                }
+            } catch (NumberFormatException e) {
+                System.out.print("Invalid input. Please enter a number: ");
+            }
+        }
+        
+        return choice;
+    }
+
+    private static void loginOrRegister() {
+        if (isUserLoggedIn()) {
+            // Logout
+            currentUser = null;
+            System.out.println("You have been logged out successfully.");
+            pressEnterToContinue();
+            return;
+        }
+        
+        clearScreen();
+        System.out.println("====================================");
+        System.out.println("         LOGIN/REGISTER            ");
+        System.out.println("====================================");
+        System.out.println("1. Login");
+        System.out.println("2. Register");
+        System.out.println("3. Back to Main Menu");
+        System.out.println("------------------------------------");
+        System.out.print("Enter your choice (1-3): ");
+        
+        int choice = getUserChoice(1, 3);
+        
+        switch (choice) {
+            case 1:
+                login();
+                break;
+            case 2:
+                register();
+                break;
+            case 3:
+                return;
+        }
+    }
+
+    private static void login() throws SQLException {
+        clearScreen();
+        System.out.println("====================================");
+        System.out.println("              LOGIN                ");
+        System.out.println("====================================");
+        
+        System.out.print("Enter username: ");
+        String username = scanner.nextLine().trim();
+        
+        System.out.print("Enter password: ");
+        String password = readPassword();
+        
+        // Check credentials in database
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "SELECT user_id, username, password, full_name FROM users WHERE username = ? AND password = ?"
+        );
+        pstmt.setString(1, username);
+        pstmt.setString(2, password);  // In a real app, you'd verify a hash, not store plain passwords
+        
+        ResultSet rs = pstmt.executeQuery();
+        if (rs.next()) {
+            int userId = rs.getInt("user_id");
+            String fullName = rs.getString("full_name");
+            currentUser = new User(userId, username, password, fullName);
+            System.out.println("Login successful! Welcome, " + fullName + "!");
+        } else {
+            System.out.println("Invalid username or password.");
+        }
+        
+        rs.close();
+        pstmt.close();
+        
+        pressEnterToContinue();
+    }
+    
+    private static String readPassword() {
+        // In a real application, you should use Console.readPassword() for secure input
+        // But for simplicity in this example, we'll use Scanner
+        return scanner.nextLine();
+    }
+
+    private static void register() throws SQLException {
+        clearScreen();
+        System.out.println("====================================");
+        System.out.println("            REGISTER               ");
+        System.out.println("====================================");
+        
+        System.out.print("Enter full name: ");
+        String fullName = scanner.nextLine().trim();
+        
+        System.out.print("Enter username: ");
+        String username = scanner.nextLine().trim();
+        
+        // Check if username already exists
+        PreparedStatement checkStmt = dbConnection.prepareStatement(
+            "SELECT COUNT(*) FROM users WHERE username = ?"
+        );
+        checkStmt.setString(1, username);
+        ResultSet rs = checkStmt.executeQuery();
+        rs.next();
+        if (rs.getInt(1) > 0) {
+            System.out.println("Username already exists. Please choose another one.");
+            rs.close();
+            checkStmt.close();
+            pressEnterToContinue();
+            return;
+        }
+        rs.close();
+        checkStmt.close();
+        
+        System.out.print("Enter password: ");
+        String password = readPassword();
+        
+        // Insert new user into database
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO users (username, password, full_name) VALUES (?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        pstmt.setString(1, username);
+        pstmt.setString(2, password);  // In a real app, this would be encrypted
+        pstmt.setString(3, fullName);
+        
+        int affectedRows = pstmt.executeUpdate();
+        if (affectedRows > 0) {
+            rs = pstmt.getGeneratedKeys();
+            if (rs.next()) {
+                int userId = rs.getInt(1);
+                currentUser = new User(userId, username, password, fullName);
+                System.out.println("\nRegistration successful!");
+            }
+            rs.close();
+        } else {
+            System.out.println("\nRegistration failed. Please try again.");
+        }
+        
+        pstmt.close();
+        pressEnterToContinue();
+    }
+
+    private static void browseQuizzes() throws SQLException {
+        clearScreen();
+        System.out.println("====================================");
+        System.out.println("           QUIZ LIST               ");
+        System.out.println("====================================");
+        
+        // Query all quizzes from the database
+        Statement stmt = dbConnection.createStatement();
+        ResultSet rs = stmt.executeQuery(
+            "SELECT q.quiz_id, q.title, q.description, q.difficulty, u.username AS creator " +
+            "FROM quizzes q JOIN users u ON q.creator_id = u.user_id " +
+            "ORDER BY q.quiz_id"
+        );
+        
+        List<Quiz> quizzes = new ArrayList<>();
+        while (rs.next()) {
+            int quizId = rs.getInt("quiz_id");
+            String title = rs.getString("title");
+            String description = rs.getString("description");
+            String difficulty = rs.getString("difficulty");
+            String creator = rs.getString("creator");
+            
+            quizzes.add(new Quiz(quizId, title, description, difficulty, creator));
+        }
+        rs.close();
+        stmt.close();
+        
+        if (quizzes.isEmpty()) {
+            System.out.println("No quizzes available.");
+            pressEnterToContinue();
+            return;
+        }
+        
+        // Display all quizzes
+        for (int i = 0; i < quizzes.size(); i++) {
+            Quiz quiz = quizzes.get(i);
+            System.out.printf("%d. %s [%s] - by %s\n   %s\n", 
+                             (i + 1), quiz.getTitle(), quiz.getDifficulty(), 
+                             quiz.getCreator(), quiz.getDescription());
+        }
+        
+        System.out.println("\n" + (quizzes.size() + 1) + ". Back to Main Menu");
+        System.out.println("------------------------------------");
+        System.out.print("Select a quiz (1-" + (quizzes.size() + 1) + "): ");
+        
+        int choice = getUserChoice(1, quizzes.size() + 1);
+        
+        if (choice <= quizzes.size()) {
+            takeQuiz(quizzes.get(choice - 1));
+        }
+    }
+
+    private static void takeQuiz(Quiz quiz) throws SQLException {
+        clearScreen();
+        System.out.println("====================================");
+        System.out.println("            TAKING QUIZ            ");
+        System.out.println("====================================");
+        System.out.println("Quiz: " + quiz.getTitle());
+        System.out.println("Description: " + quiz.getDescription());
+        System.out.println("Difficulty: " + quiz.getDifficulty());
+        System.out.println("------------------------------------");
+        
+        // Fetch all questions for this quiz from database
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "SELECT question_id, text, question_type, difficulty FROM questions WHERE quiz_id = ?"
+        );
+        pstmt.setInt(1, quiz.getId());
+        ResultSet rs = pstmt.executeQuery();
+        
+        List<Question> questions = new ArrayList<>();
+        while (rs.next()) {
+            int questionId = rs.getInt("question_id");
+            String text = rs.getString("text");
+            String questionType = rs.getString("question_type");
+            String difficulty = rs.getString("difficulty");
+            
+            questions.add(new Question(questionId, text, questionType, difficulty));
+        }
+        rs.close();
+        pstmt.close();
+        
+        if (questions.isEmpty()) {
+            System.out.println("This quiz has no questions yet.");
+            pressEnterToContinue();
+            return;
+        }
+        
+        // Randomize question order
+        Collections.shuffle(questions);
+        
+        int score = 0;
+        
+        // Present each question to the user
+        for (int i = 0; i < questions.size(); i++) {
+            Question question = questions.get(i);
+            System.out.println("\nQuestion " + (i + 1) + " [" + question.getDifficulty() + "]: " + question.getText());
+            
+            boolean isCorrect = false;
+            switch (question.getType()) {
+                case "MULTIPLE_CHOICE":
+                    isCorrect = handleMultipleChoiceQuestion(question);
+                    break;
+                case "TRUE_FALSE":
+                    isCorrect = handleTrueFalseQuestion(question);
+                    break;
+                case "FILL_BLANK":
+                    isCorrect = handleFillBlankQuestion(question);
+                    break;
+                case "SHORT_ANSWER":
+                    isCorrect = handleShortAnswerQuestion(question);
+                    break;
+            }
+            
+            if (isCorrect) {
+                System.out.println("Correct!");
+                score++;
+            } else {
+                System.out.println("Incorrect.");
+                displayCorrectAnswer(question);
+            }
+        }
+        
+        // Save the quiz attempt
+        saveQuizAttempt(quiz.getId(), score, questions.size());
+        
+        // Display quiz results
+        System.out.println("\n====================================");
+        System.out.println("            QUIZ RESULTS           ");
+        System.out.println("====================================");
+        System.out.println("Your score: " + score + "/" + questions.size());
+        double percentage = (double) score / questions.size() * 100;
+        System.out.println("Percentage: " + String.format("%.1f", percentage) + "%");
+        
+        if (percentage >= 80) {
+            System.out.println("Excellent job!");
+        } else if (percentage >= 60) {
+            System.out.println("Good work!");
+        } else {
+            System.out.println("Keep practicing!");
+        }
+        
+        pressEnterToContinue();
+    }
+    
+    private static boolean handleMultipleChoiceQuestion(Question question) throws SQLException {
+        // Fetch options for this question
+        List<Option> options = fetchOptionsForQuestion(question.getId());
+        
+        // Randomize option order
+        Collections.shuffle(options);
+        
+        // Display options
+        for (int i = 0; i < options.size(); i++) {
+            System.out.println((i + 1) + ". " + options.get(i).getText());
+        }
+        
+        // Get user's answer
+        System.out.print("\nYour answer (1-" + options.size() + "): ");
+        int answer = getUserChoice(1, options.size());
+        
+        // Check if the chosen option is correct
+        return options.get(answer - 1).isCorrect();
+    }
+    
+    private static boolean handleTrueFalseQuestion(Question question) throws SQLException {
+        // Display True/False options
+        System.out.println("1. True");
+        System.out.println("2. False");
+        
+        // Get user's answer
+        System.out.print("\nYour answer (1-2): ");
+        int answer = getUserChoice(1, 2);
+        
+        // Fetch the correct answer
+        List<Option> options = fetchOptionsForQuestion(question.getId());
+        boolean correctAnswerIsTrue = options.stream()
+            .filter(Option::isCorrect)
+            .findFirst()
+            .map(option -> option.getText().equals("True"))
+            .orElse(false);
+        
+        // Check if user's answer is correct
+        return (answer == 1 && correctAnswerIsTrue) || (answer == 2 && !correctAnswerIsTrue);
+    }
+    
+    private static boolean handleFillBlankQuestion(Question question) throws SQLException {
+        // Get user's answer
+        System.out.print("\nYour answer: ");
+        String answer = scanner.nextLine().trim().toLowerCase();
+        
+        // Fetch the correct answer
+        String correctAnswer = fetchAnswerForQuestion(question.getId());
+        
+        // Check if user's answer is correct (case-insensitive)
+        return answer.equalsIgnoreCase(correctAnswer);
+    }
+    
+    private static boolean handleShortAnswerQuestion(Question question) throws SQLException {
+        // Get user's answer
+        System.out.print("\nYour answer: ");
+        String answer = scanner.nextLine().trim().toLowerCase();
+        
+        // Fetch the correct answer
+        String correctAnswer = fetchAnswerForQuestion(question.getId());
+        
+        // Check if user's answer is correct (case-insensitive)
+        // For short answer, we could implement more sophisticated matching
+        // Here we just do exact match on the lowercased string
+        return answer.equalsIgnoreCase(correctAnswer);
+    }
+    
+    private static void displayCorrectAnswer(Question question) throws SQLException {
+        switch (question.getType()) {
+            case "MULTIPLE_CHOICE":
+            case "TRUE_FALSE":
+                List<Option> options = fetchOptionsForQuestion(question.getId());
+                Option correctOption = options.stream()
+                    .filter(Option::isCorrect)
+                    .findFirst()
+                    .orElse(null);
+                
+                if (correctOption != null) {
+                    System.out.println("The correct answer is: " + correctOption.getText());
+                }
+                break;
+                
+            case "FILL_BLANK":
+            case "SHORT_ANSWER":
+                String correctAnswer = fetchAnswerForQuestion(question.getId());
+                System.out.println("The correct answer is: " + correctAnswer);
+                break;
+        }
+    }
+    
+    private static List<Option> fetchOptionsForQuestion(int questionId) throws SQLException {
+        List<Option> options = new ArrayList<>();
+        
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "SELECT option_id, option_text, is_correct FROM options WHERE question_id = ?"
+        );
+        pstmt.setInt(1, questionId);
+        ResultSet rs = pstmt.executeQuery();
+        
+        while (rs.next()) {
+            int optionId = rs.getInt("option_id");
+            String optionText = rs.getString("option_text");
+            boolean isCorrect = rs.getBoolean("is_correct");
+            
+            options.add(new Option(optionId, optionText, isCorrect));
+        }
+        
+        rs.close();
+        pstmt.close();
+        
+        return options;
+    }
+    
+    private static String fetchAnswerForQuestion(int questionId) throws SQLException {
+        String answer = "";
+        
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "SELECT answer_text FROM answers WHERE question_id = ?"
+        );
+        pstmt.setInt(1, questionId);
+        ResultSet rs = pstmt.executeQuery();
+        
+        if (rs.next()) {
+            answer = rs.getString("answer_text");
+        }
+        
+        rs.close();
+        pstmt.close();
+        
+        return answer;
+    }
+    
+    private static void saveQuizAttempt(int quizId, int score, int totalQuestions) throws SQLException {
+        if (currentUser == null) {
+            return;  // Cannot save attempt if not logged in
+        }
+        
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO quiz_attempts (user_id, quiz_id, score, total_questions) VALUES (?, ?, ?, ?)"
+        );
+        pstmt.setInt(1, currentUser.getId());
+        pstmt.setInt(2, quizId);
+        pstmt.setInt(3, score);
+        pstmt.setInt(4, totalQuestions);
+        
+        pstmt.executeUpdate();
+        pstmt.close();
+    }
+
+    private static void createQuiz() throws SQLException {
+        clearScreen();
+        System.out.println("====================================");
+        System.out.println("           CREATE QUIZ             ");
+        System.out.println("====================================");
+        
+        System.out.print("Enter quiz title: ");
+        String title = scanner.nextLine().trim();
+        
+        System.out.print("Enter quiz description: ");
+        String description = scanner.nextLine().trim();
+        
+        System.out.println("\nSelect difficulty level:");
+        System.out.println("1. Easy");
+        System.out.println("2. Medium");
+        System.out.println("3. Hard");
+        System.out.print("Enter choice (1-3): ");
+        int difficultyChoice = getUserChoice(1, 3);
+        
+        String difficulty;
+        switch (difficultyChoice) {
+            case 1: difficulty = "EASY"; break;
+            case 2: difficulty = "MEDIUM"; break;
+            default: difficulty = "HARD"; break;
+        }
+        
+        // Insert new quiz into database
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO quizzes (title, description, creator_id, difficulty) VALUES (?, ?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        pstmt.setString(1, title);
+        pstmt.setString(2, description);
+        pstmt.setInt(3, currentUser.getId());
+        pstmt.setString(4, difficulty);
+        
+        int affectedRows = pstmt.executeUpdate();
+        if (affectedRows == 0) {
+            System.out.println("Creating quiz failed, no rows affected.");
+            pstmt.close();
+            pressEnterToContinue();
+            return;
+        }
+        
+        ResultSet generatedKeys = pstmt.getGeneratedKeys();
+        int quizId;
+        if (generatedKeys.next()) {
+            quizId = generatedKeys.getInt(1);
+        } else {
+            System.out.println("Creating quiz failed, no ID obtained.");
+            pstmt.close();
+            pressEnterToContinue();
+            return;
+        }
+        pstmt.close();
+        
+        System.out.print("\nHow many questions do you want to add? ");
+        int numQuestions = getUserChoice(1, 20);
+        
+        for (int i = 0; i < numQuestions; i++) {
+            System.out.println("\n----- Question " + (i + 1) + " -----");
+            addQuestionToQuiz(quizId);
+        }
+        
+        System.out.println("\nQuiz created successfully!");
+        pressEnterToContinue();
+    }
+    
+    private static void addQuestionToQuiz(int quizId) throws SQLException {
+        System.out.println("Select question type:");
+        System.out.println("1. Multiple Choice");
+        System.out.println("2. True/False");
+        System.out.println("3. Fill in the Blank");
+        System.out.println("4. Short Answer");
+        System.out.print("Enter choice (1-4): ");
+        int typeChoice = getUserChoice(1, 4);
+        
+        String questionType;
+        switch (typeChoice) {
+            case 1: questionType = "MULTIPLE_CHOICE"; break;
+            case 2: questionType = "TRUE_FALSE"; break;
+            case 3: questionType = "FILL_BLANK"; break;
+            default: questionType = "SHORT_ANSWER"; break;
+        }
+        
+        System.out.println("\nSelect difficulty level:");
+        System.out.println("1. Easy");
+        System.out.println("2. Medium");
+        System.out.println("3. Hard");
+        System.out.print("Enter choice (1-3): ");
+        int difficultyChoice = getUserChoice(1, 3);
+        
+        String difficulty;
+        switch (difficultyChoice) {
+            case 1: difficulty = "EASY"; break;
+            case 2: difficulty = "MEDIUM"; break;
+            default: difficulty = "HARD"; break;
+        }
+        
+        System.out.print("\nEnter question text: ");
+        String questionText = scanner.nextLine().trim();
+        
+        // Insert question
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO questions (quiz_id, text, question_type, difficulty) VALUES (?, ?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        pstmt.setInt(1, quizId);
+        pstmt.setString(2, questionText);
+        pstmt.setString(3, questionType);
+        pstmt.setString(4, difficulty);
+        
+        pstmt.executeUpdate();
+        ResultSet rs = pstmt.getGeneratedKeys();
+        int questionId = rs.next() ? rs.getInt(1) : -1;
+        rs.close();
+        pstmt.close();
+        
+        if (questionId == -1) {
+            System.out.println("Failed to add question.");
+            return;
+        }
+        
+        // Add options or answer based on question type
+        switch (questionType) {
+            case "MULTIPLE_CHOICE":
+                addMultipleChoiceOptions(questionId);
+                break;
+            case "TRUE_FALSE":
+                addTrueFalseOptions(questionId);
+                break;
+            case "FILL_BLANK":
+            case "SHORT_ANSWER":
+                addTextAnswer(questionId);
+                break;
+        }
+    }
+    
+    private static void addMultipleChoiceOptions(int questionId) throws SQLException {
+        System.out.print("\nHow many options? (2-6): ");
+        int numOptions = getUserChoice(2, 6);
+        
+        List<String> options = new ArrayList<>();
+        for (int i = 0; i < numOptions; i++) {
+            System.out.print("Option " + (i + 1) + ": ");
+            options.add(scanner.nextLine().trim());
+        }
+        
+        System.out.print("\nWhich option is correct? (1-" + numOptions + "): ");
+        int correctOption = getUserChoice(1, numOptions) - 1;
+        
+        // Insert options into database
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO options (question_id, option_text, is_correct) VALUES (?, ?, ?)"
+        );
+        
+        for (int i = 0; i < options.size(); i++) {
+            pstmt.setInt(1, questionId);
+            pstmt.setString(2, options.get(i));
+            pstmt.setBoolean(3, i == correctOption);
+            pstmt.executeUpdate();
+        }
+        
+        pstmt.close();
+    }
+    
+    private static void addTrueFalseOptions(int questionId) throws SQLException {
+        System.out.print("\nIs the statement true? (1: Yes, 2: No): ");
+        int choice = getUserChoice(1, 2);
+        boolean isTrue = (choice == 1);
+        
+        // Insert True/False options
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO options (question_id, option_text, is_correct) VALUES (?, ?, ?)"
+        );
+        
+        // Add True option
+        pstmt.setInt(1, questionId);
+        pstmt.setString(2, "True");
+        pstmt.setBoolean(3, isTrue);
+        pstmt.executeUpdate();
+        
+        // Add False option
+        pstmt.setInt(1, questionId);
+        pstmt.setString(2, "False");
+        pstmt.setBoolean(3, !isTrue);
+        pstmt.executeUpdate();
+        
+        pstmt.close();
+    }
+    
+    private static void addTextAnswer(int questionId) throws SQLException {
+        System.out.print("\nEnter the correct answer: ");
+        String answer = scanner.nextLine().trim();
+        
+        // Insert answer
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "INSERT INTO answers (question_id, answer_text) VALUES (?, ?)"
+        );
+        pstmt.setInt(1, questionId);
+        pstmt.setString(2, answer.toLowerCase());  // Store lowercase for case-insensitive matching
+        
+        pstmt.executeUpdate();
+        pstmt.close();
+    }
+    
+    private static void viewUserStatistics() throws SQLException {
+        clearScreen();
+        System.out.println("====================================");
+        System.out.println("         USER STATISTICS           ");
+        System.out.println("====================================");
+        System.out.println("User: " + currentUser.getFullName());
+        System.out.println("------------------------------------");
+        
+        // Query user's quiz attempts
+        PreparedStatement pstmt = dbConnection.prepareStatement(
+            "SELECT qa.attempt_id, q.title, qa.score, qa.total_questions, qa.taken_at " +
+            "FROM quiz_attempts qa " +
+            "JOIN quizzes q ON qa.quiz_id = q.quiz_id " +
+            "WHERE qa.user_id = ? " +
+            "ORDER BY qa.taken_at DESC"
+        );
+        pstmt.setInt(1, currentUser.getId());
+        ResultSet rs = pstmt.executeQuery();
+        
+        List<QuizAttempt> attempts = new ArrayList<>();
+        while (rs.next()) {
+            int attemptId = rs.getInt("attempt_id");
+            String quizTitle = rs.getString("title");
+            int score = rs.getInt("score");
+            int totalQuestions = rs.getInt("total_questions");
+            String takenAt = rs.getString("taken_at");
+            
+            attempts.add(new QuizAttempt(attemptId, quizTitle, score, totalQuestions, takenAt));
+        }
+        rs.close();
+        pstmt.close();
+        
+        if (attempts.isEmpty()) {
+            System.out.println("You haven't taken any quizzes yet.");
+        } else {
+            double totalScore = 0;
+            double totalQuestions = 0;
+            
+            System.out.println("Quiz History:");
+            for (int i = 0; i < attempts.size(); i++) {
+                QuizAttempt attempt = attempts.get(i);
+                System.out.printf("%d. %s - Score: %d/%d (%.1f%%) - %s\n",
+                                 (i + 1), attempt.getQuizTitle(), 
+                                 attempt.getScore(), attempt.getTotalQuestions(),
+                                 attempt.getPercentage(), attempt.getTakenAt());
+                
+                totalScore += attempt.getScore();
+                totalQuestions += attempt.getTotalQuestions();
+            }
+            
+            // Get statistics by difficulty level
+            System.out.println("\nPerformance by Difficulty:");
+            
+            String[] difficulties = {"EASY", "MEDIUM", "HARD"};
+            for (String difficulty : difficulties) {
+                pstmt = dbConnection.prepareStatement(
+                    "SELECT SUM(qa.score) as total_score, SUM(qa.total_questions) as total_questions " +
+                    "FROM quiz_attempts qa " +
+                    "JOIN quizzes q ON qa.quiz_id = q.quiz_id " +
+                    "WHERE qa.user_id = ? AND q.difficulty = ?"
+                );
+                pstmt.setInt(1, currentUser.getId());
+                pstmt.setString(2, difficulty);
+                rs = pstmt.executeQuery();
+                
+                if (rs.next() && rs.getObject("total_score") != null) {
+                    int difficultyScore = rs.getInt("total_score");
+                    int difficultyQuestions = rs.getInt("total_questions");
+                    double difficultyPercentage = (double) difficultyScore / difficultyQuestions * 100;
+                    
+                    System.out.printf("%s: %.1f%% (%d/%d)\n", 
+                                     difficulty, difficultyPercentage, 
+                                     difficultyScore, difficultyQuestions);
+                }
+                rs.close();
+                pstmt.close();
+            }
+            
+            double averagePerformance = (totalScore / totalQuestions) * 100;
+            System.out.printf("\nOverall Performance: %.1f%%\n", averagePerformance);
+        }
+        
+        pressEnterToContinue();
+    }
+
+    private static boolean isUserLoggedIn() {
+        return currentUser != null;
+    }
+
+    private static void clearScreen() {
+        // This is a simple way to "clear" the screen
+        for (int i = 0; i < 50; i++) {
+            System.out.println();
+        }
+    }
+
+    private static void pressEnterToContinue() {
+        System.out.println("\nPress Enter to continue...");
+        scanner.nextLine();
+    }
+}
+
+// Model classes
+class User {
+    private int id;
+    private String username;
+    private String password;
+    private String fullName;
+    
+    public User(int id, String username, String password, String fullName) {
+        this.id = id;
+        this.username = username;
+        this.password = password;
+        this.fullName = fullName;
+    }
+    
+    public int getId() {
+        return id;
+    }
+    
+    public String getUsername() {
+        return username;
+    }
+    
+    public String getFullName() {
+        return fullName;
+    }
+}
+
+class QuizAttempt {
+    private int id;
+    private String quizTitle;
+    private int score;
+    private int totalQuestions;
+    private String takenAt;
+    
+    public QuizAttempt(int id, String quizTitle, int score, int totalQuestions, String takenAt) {
+        this.id = id;
+        this.quizTitle = quizTitle;
+        this.score = score;
+        this.totalQuestions = totalQuestions;
+        this.takenAt = takenAt;
+    }
+    
+    public String getQuizTitle() {
+        return quizTitle;
+    }
+    
+    public int getScore() {
+        return score;
+    }
+    
+    public int getTotalQuestions() {
+        return totalQuestions;
+    }
+    
+    public String getTakenAt() {
+        return takenAt;
+    }
+    
+    public double getPercentage() {
+        return (double) score / totalQuestions * 100;
+    }
+}
+
+class Quiz {
+    private int id;
+    private String title;
+    private String description;
+    private String difficulty;
+    private String creator;
+    
+    public Quiz(int id, String title, String description, String difficulty, String creator) {
+        this.id = id;
+        this.title = title;
+        this.description = description;
+        this.difficulty = difficulty;
+        this.creator = creator;
+    }
+    
+    public int getId() {
+        return id;
+    }
+    
+    public String getTitle() {
+        return title;
+    }
+    
+    public String getDescription() {
+        return description;
+    }
+    
+    public String getDifficulty() {
+        return difficulty;
+    }
+    
+    public String getCreator() {
+        return creator;
+    }
+}
+
+class Question {
+    private int id;
+    private String text;
+    private String type;
+    private String difficulty;
+    
+    public Question(int id, String text, String type, String difficulty) {
+        this.id = id;
+        this.text = text;
+        this.type = type;
+        this.difficulty = difficulty;
+    }
+    
+    public int getId() {
+        return id;
+    }
+    
+    public String getText() {
+        return text;
+    }
+    
+    public String getType() {
+        return type;
+    }
+    
+    public String getDifficulty() {
+        return difficulty;
+    }
+}
+
+class Option {
+    private int id;
+    private String text;
+    private boolean correct;
+    
+    public Option(int id, String text, boolean correct) {
+        this.id = id;
+        this.text = text;
+        this.correct = correct;
+    }
+    
+    public int getId() {
+        return id;
+    }
+    
+    public String getText() {
+        return text;
+    }
+    
+    public boolean isCorrect() {
+        return correct;
+    }
+}
